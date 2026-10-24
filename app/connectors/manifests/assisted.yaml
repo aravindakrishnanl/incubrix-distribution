@@ -1,0 +1,17 @@
+key: assisted
+version: 1.0.0
+tier: assisted
+auth: none
+surfaces:
+  - key: pack
+    content_types: [text, image, video_link]
+    spec:
+      max_files: 10
+      links_allowed: true
+rate_limits:
+  per_connection:
+    requests: 1000
+    per_seconds: 60
+capabilities: [build_assist_pack]
+error_map: {}
+instance_param: null

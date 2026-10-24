@@ -1,0 +1,20 @@
+key: webhook_hmac
+version: 1.0.0
+tier: bridge
+auth: api_key
+surfaces:
+  - key: webhook
+    content_types: [text, image, video_link]
+    spec:
+      payload_max_bytes: 65536
+      links_allowed: true
+rate_limits:
+  per_connection:
+    requests: 120
+    per_seconds: 60
+capabilities: [publish, status, delete]
+error_map:
+  "429": PLATFORM_RATE_LIMIT
+  "401": CONNECTION_AUTH_EXPIRED
+  "503": PLATFORM_UNAVAILABLE
+instance_param: webhook_url

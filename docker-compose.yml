@@ -1,0 +1,234 @@
+# IncuBrix Distribution — docker-compose.yml
+# Full assessment stack: app + PostgreSQL + MinIO + local Lemmy + Ghost + mock server
+# Usage: docker compose up --wait
+# All secrets come from .env (copy from .env.example).
+
+version: "3.9"
+
+x-app-env: &app-env
+  APP_ENV: ${APP_ENV:-development}
+  APP_HOST: 0.0.0.0
+  APP_PORT: "8000"
+  APP_LOG_LEVEL: ${APP_LOG_LEVEL:-INFO}
+  API_BEARER_TOKEN: ${API_BEARER_TOKEN:-change-me-local-dev-token}
+  DATABASE_URL: postgresql+asyncpg://incubrix:${DB_PASSWORD:-incubrix_dev_password}@db:5432/incubrix_dist
+  DATABASE_URL_SYNC: postgresql+psycopg2://incubrix:${DB_PASSWORD:-incubrix_dev_password}@db:5432/incubrix_dist
+  S3_ENDPOINT_URL: http://minio:9000
+  S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-minioadmin}
+  S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-minioadmin_dev_secret}
+  S3_BUCKET: ${S3_BUCKET:-incubrix-dist}
+  S3_REGION: us-east-1
+  STORAGE_BACKEND: s3
+  CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:-REPLACE_ME}
+  HMAC_SIGNING_SECRET: ${HMAC_SIGNING_SECRET:-change-me-hmac-secret}
+  SIMULATION_MODE: "false"
+  CONNECTOR_DISCOURSE_ENABLED: "true"
+  CONNECTOR_LEMMY_ENABLED: "true"
+  CONNECTOR_DEVTO_ENABLED: "true"
+  CONNECTOR_GHOST_ENABLED: "true"
+  CONNECTOR_WEBHOOK_HMAC_ENABLED: "true"
+  CONNECTOR_ASSISTED_ENABLED: "true"
+  # Service URLs for local test instances
+  DISCOURSE_BASE_URL: http://mock-server:8080/discourse
+  LEMMY_BASE_URL: http://lemmy:8536
+  LEMMY_USERNAME: admin
+  LEMMY_PASSWORD: ${LEMMY_PASSWORD:-admin_password}
+  LEMMY_COMMUNITY_ID: "2"
+  DEVTO_API_BASE_URL: http://mock-server:8080/devto
+  DEVTO_API_KEY: ${DEVTO_API_KEY:-mock-devto-key}
+  GHOST_API_BASE_URL: http://ghost:2368
+  GHOST_ADMIN_API_KEY: ${GHOST_ADMIN_API_KEY:-mock-ghost-key}
+  HTTP_TIMEOUT_SECONDS: "30"
+
+services:
+  # ── PostgreSQL ────────────────────────────────────────────────────────────
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: incubrix
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-incubrix_dev_password}
+      POSTGRES_DB: incubrix_dist
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports: []          # not exposed publicly; app connects via service name
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U incubrix -d incubrix_dist"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  # ── MinIO (S3-compatible storage) ─────────────────────────────────────────
+  minio:
+    image: minio/minio:RELEASE.2024-11-07T00-52-20Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY_ID:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY:-minioadmin_dev_secret}
+    volumes:
+      - minio_data:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"    # MinIO console (dev only)
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 10s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+  # ── MinIO bucket initialiser (one-shot) ───────────────────────────────────
+  minio-init:
+    image: minio/mc:RELEASE.2024-11-17T19-35-25Z
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+        mc alias set local http://minio:9000 $${MINIO_ROOT_USER:-minioadmin} $${MINIO_ROOT_PASSWORD:-minioadmin_dev_secret};
+        mc mb --ignore-existing local/incubrix-dist;
+        echo 'Bucket ready';
+      "
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY_ID:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY:-minioadmin_dev_secret}
+    restart: "no"
+
+  # ── Lemmy (local test instance) ───────────────────────────────────────────
+  # Lemmy requires its own PostgreSQL database.
+  lemmy-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: lemmy
+      POSTGRES_PASSWORD: lemmy_dev_password
+      POSTGRES_DB: lemmy
+    volumes:
+      - lemmy_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lemmy -d lemmy"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  lemmy:
+    image: dessalines/lemmy:0.19.5
+    depends_on:
+      lemmy-db:
+        condition: service_healthy
+    environment:
+      RUST_LOG: warn
+      LEMMY_DATABASE_URL: postgresql://lemmy:lemmy_dev_password@lemmy-db:5432/lemmy
+    volumes:
+      - ./infra/lemmy/lemmy.hjson:/config/config.hjson:ro
+    ports:
+      - "8536:8536"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8536/api/v3/site"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+      start_period: 30s
+    restart: unless-stopped
+
+  lemmy-ui:
+    image: dessalines/lemmy-ui:0.19.5
+    depends_on:
+      lemmy:
+        condition: service_healthy
+    environment:
+      LEMMY_UI_LEMMY_INTERNAL_HOST: lemmy:8536
+      LEMMY_UI_LEMMY_EXTERNAL_HOST: localhost:8536
+      LEMMY_UI_HTTPS: "false"
+    ports:
+      - "1234:1234"
+    restart: unless-stopped
+
+  # ── Ghost (local test instance) ────────────────────────────────────────────
+  ghost:
+    image: ghost:5.101-alpine
+    depends_on:
+      ghost-db:
+        condition: service_healthy
+    environment:
+      url: http://localhost:2368
+      database__client: mysql
+      database__connection__host: ghost-db
+      database__connection__user: ghost
+      database__connection__password: ghost_dev_password
+      database__connection__database: ghost
+      NODE_ENV: development
+    volumes:
+      - ghost_data:/var/lib/ghost/content
+    ports:
+      - "2368:2368"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:2368/ghost/api/admin/site/"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  ghost-db:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: ghost_root_password
+      MYSQL_DATABASE: ghost
+      MYSQL_USER: ghost
+      MYSQL_PASSWORD: ghost_dev_password
+    volumes:
+      - ghost_db_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "ghost", "-pghost_dev_password"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+
+  # ── Mock server (Discourse, Dev.to, webhook targets) ─────────────────────
+  mock-server:
+    build:
+      context: ./infra/mock-server
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  # ── Main application ───────────────────────────────────────────────────────
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      db:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      <<: *app-env
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  minio_data:
+  lemmy_db_data:
+  ghost_data:
+  ghost_db_data:
