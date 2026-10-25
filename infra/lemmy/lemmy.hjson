@@ -12,14 +12,6 @@
     password: "lemmy_dev_password"
     pool_size: 5
   }
-  email: {
-    smtp_server: ""
-    smtp_login: ""
-    smtp_password: ""
-    smtp_port: 587
-    tls_type: "none"
-    address_from: "noreply@localhost"
-  }
   setup: {
     admin_username: "admin"
     admin_password: "admin_password"
