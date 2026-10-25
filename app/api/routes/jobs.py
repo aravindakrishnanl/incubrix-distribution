@@ -102,6 +102,48 @@ async def get_job(
     return _job_response(job)
 
 
+@router.get("/jobs/{job_id}/manifest")
+async def get_job_manifest(
+    job_id: str,
+    _token: str = Depends(require_bearer_token),
+    db: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """Get the machine-readable output manifest (IS-9) for a job."""
+    from sqlalchemy import select
+    from app.db.models.manifest import OutputManifest
+
+    job_repo = JobRepository(db)
+    job = await job_repo.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found.")
+
+    res = await db.execute(select(OutputManifest).where(OutputManifest.job_id == job_id))
+    manifest = res.scalar_one_or_none()
+    if not manifest or not manifest.manifest_json:
+        raise HTTPException(status_code=404, detail="Manifest not found for job.")
+    return json.loads(manifest.manifest_json)
+
+
+@router.get("/jobs/{job_id}/result")
+async def get_job_result(
+    job_id: str,
+    _token: str = Depends(require_bearer_token),
+    db: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """Get job result details."""
+    job_repo = JobRepository(db)
+    job = await job_repo.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found.")
+    return {
+        "job_id": job.id,
+        "status": job.state,
+        "platform_post_id": job.platform_post_id,
+        "live_url": job.live_url,
+        "result_url": job.result_url or f"/api/v1/jobs/{job.id}/manifest",
+    }
+
+
 def _job_response(job: PublishJob) -> dict:
     resp = {
         "job_id": job.id,
@@ -114,7 +156,7 @@ def _job_response(job: PublishJob) -> dict:
         resp["result"] = {
             "platform_post_id": job.platform_post_id,
             "live_url": job.live_url,
-            "result_url": job.result_url,
+            "result_url": job.result_url or f"/api/v1/jobs/{job.id}/manifest",
         }
     if job.state == JobState.FAILED:
         resp["error"] = {

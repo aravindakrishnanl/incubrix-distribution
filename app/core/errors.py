@@ -183,11 +183,56 @@ class AuthExpiredError(AppError):
         )
 
 
-# ── FastAPI exception handlers ─────────────────────────────────────────────────
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
 
 async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
     """Convert AppError into the standard error envelope."""
     return exc.to_response()
+
+
+async def http_exception_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+    """Convert HTTPException into the standard error envelope."""
+    code_map = {
+        400: ErrorCode.VALIDATION_ERROR,
+        401: ErrorCode.UNAUTHORIZED,
+        403: ErrorCode.FORBIDDEN,
+        404: ErrorCode.NOT_FOUND,
+        409: ErrorCode.CONFLICT,
+        422: ErrorCode.VALIDATION_ERROR,
+        429: ErrorCode.RATE_LIMITED,
+        503: ErrorCode.PLATFORM_UNAVAILABLE,
+    }
+    code = code_map.get(exc.status_code, ErrorCode.INTERNAL_ERROR)
+    message = exc.detail if isinstance(exc.detail, str) else "HTTP request error."
+    details = exc.detail if isinstance(exc.detail, dict) else {}
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=ErrorEnvelope(
+            error=ErrorDetail(
+                code=code,
+                message=message,
+                retryable=_RETRYABLE.get(code, False),
+                details=details,
+            )
+        ).model_dump(),
+    )
+
+
+async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    """Convert RequestValidationError into the standard error envelope."""
+    return JSONResponse(
+        status_code=422,
+        content=ErrorEnvelope(
+            error=ErrorDetail(
+                code=ErrorCode.VALIDATION_ERROR,
+                message="Request validation failed.",
+                retryable=False,
+                details={"errors": exc.errors()},
+            )
+        ).model_dump(),
+    )
 
 
 async def generic_error_handler(request: Request, exc: Exception) -> JSONResponse:

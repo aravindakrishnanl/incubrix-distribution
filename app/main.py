@@ -14,9 +14,18 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
 from app.api.routes import health, connector, jobs, destinations, storage, connections, certification
 from app.connectors.registry import init_registry
-from app.core.errors import AppError, app_error_handler, generic_error_handler
+from app.core.errors import (
+    AppError,
+    app_error_handler,
+    generic_error_handler,
+    http_exception_handler,
+    validation_exception_handler,
+)
 from app.core.logging import configure_logging, get_logger
 from app.core.middleware import CorrelationIdMiddleware
 from app.core.settings import get_settings
@@ -65,6 +74,8 @@ app.add_middleware(CorrelationIdMiddleware)
 
 # ── Exception handlers ────────────────────────────────────────────────────────
 app.add_exception_handler(AppError, app_error_handler)
+app.add_exception_handler(StarletteHTTPException, http_exception_handler)
+app.add_exception_handler(RequestValidationError, validation_exception_handler)
 app.add_exception_handler(Exception, generic_error_handler)
 
 # ── Routers ───────────────────────────────────────────────────────────────────

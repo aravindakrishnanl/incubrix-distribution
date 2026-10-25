@@ -23,7 +23,7 @@
 | Image | License | Use |
 |-------|---------|-----|
 | postgres:16-alpine | PostgreSQL License | Application and test database |
-| minio/minio | AGPLv3 | S3-compatible object storage (compose only, not shipped in service) |
+| minio/minio / pgsty/silo | AGPLv3 / Apache 2.0 | S3-compatible object storage (compose only, not shipped in service) |
 | ghost:5.101-alpine | MIT | Local Ghost test instance |
 | dessalines/lemmy | AGPLv3 | Local Lemmy test instance (compose only) |
 

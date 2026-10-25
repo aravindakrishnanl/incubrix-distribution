@@ -193,7 +193,10 @@ async def test_check_connectivity_api_route(async_client):
             assert data["ok"] is True
 
 
-def test_settings_env_aliases():
+def test_settings_env_aliases(monkeypatch):
+    monkeypatch.delenv("DEVTO_API_KEY", raising=False)
+    monkeypatch.delenv("DEVTO_API_BASE_URL", raising=False)
+    monkeypatch.delenv("GHOST_ADMIN_API_KEY", raising=False)
     from app.core.settings import Settings
     s = Settings(_env_file=None, dev_api_key="my-key", dev_api_base_url="https://mydev.to/api", ghost_api_key="gkey:123")
     assert s.devto_api_key == "my-key"

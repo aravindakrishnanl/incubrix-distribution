@@ -119,3 +119,58 @@ async def test_get_job_returns_correct_structure(async_client):
 async def test_get_nonexistent_job_returns_404(async_client):
     resp = await async_client.get("/api/v1/jobs/nonexistent-job-id-xyz")
     assert resp.status_code == 404
+    data = resp.json()
+    assert "error" in data
+    assert data["error"]["code"] == "NOT_FOUND"
+
+
+@pytest.mark.asyncio
+async def test_idempotency_after_simulated_timeout_and_manifest_link(async_client):
+    """Simulates a client timeout on initial publish, retrying with the same idempotency key."""
+    import asyncio
+    payload = {
+        "connector_key": "assisted",
+        "rendition": {"title": "Timeout retry test", "body": "Body content here"},
+        "destination": {"url": "https://example.com/dest"},
+        "connection": {},
+    }
+    idem_key = "timeout-sim-retry-001"
+    headers = {"Idempotency-Key": idem_key}
+
+    # First request submitted
+    resp1 = await async_client.post("/api/v1/publish", json=payload, headers=headers)
+    assert resp1.status_code == 202
+    job_id_1 = resp1.json()["job_id"]
+
+    # Client "timed out" waiting for a response, and retries with the exact same key & body
+    resp2 = await async_client.post("/api/v1/publish", json=payload, headers=headers)
+    assert resp2.status_code == 202
+    job_id_2 = resp2.json()["job_id"]
+
+    assert job_id_1 == job_id_2
+
+    # Allow async background worker to process job
+    for _ in range(25):
+        await asyncio.sleep(0.1)
+        status_resp = await async_client.get(f"/api/v1/jobs/{job_id_1}")
+        assert status_resp.status_code == 200
+        state = status_resp.json().get("status")
+        if state in ("succeeded", "failed"):
+            break
+
+    final_resp = await async_client.get(f"/api/v1/jobs/{job_id_1}")
+    data = final_resp.json()
+    assert data["status"] == "succeeded"
+    assert "result" in data
+    assert "result_url" in data["result"]
+    assert data["result"]["result_url"].endswith(f"/api/v1/jobs/{job_id_1}/manifest")
+
+    # Follow result link
+    manifest_resp = await async_client.get(data["result"]["result_url"])
+    assert manifest_resp.status_code == 200
+    manifest = manifest_resp.json()
+    assert manifest["manifest_version"] == "1.0.0"
+    assert manifest["job_id"] == job_id_1
+    assert "timings_ms" in manifest
+    assert "models_providers" in manifest
+    assert "license" in manifest

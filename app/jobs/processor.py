@@ -14,7 +14,7 @@ from app.db.engine import get_session_factory
 from app.db.models.job import JobState
 from app.db.repos.jobs import JobRepository
 from app.connectors.registry import get_connector
-from app.core.errors import AppError
+from app.core.errors import AppError, DestSpecViolationError, ErrorCode
 
 logger = get_logger(__name__)
 
@@ -43,6 +43,7 @@ async def process_publish_job(job_id: str, request_body: dict) -> None:
             connection = request_body.get("connection", {})
             idempotency_key = request_body.get("idempotency_key", job_id)
             destination_id = request_body.get("destination_id")
+            callback_url = request_body.get("callback_url")
 
             # ── Resolve Destination from DB if needed ────────────────────────
             if destination_id:
@@ -93,6 +94,8 @@ async def process_publish_job(job_id: str, request_body: dict) -> None:
                     logger.warning("conn_credential_decrypt_failed", conn_id=conn_record.id, err=str(exc))
 
             connector = get_connector(connector_key)
+            import time
+            t0 = time.perf_counter()
 
             # ── Rules evaluation ─────────────────────────────────────────────
             await repo.update_state(job_id, JobState.RUNNING, progress=15)
@@ -100,6 +103,7 @@ async def process_publish_job(job_id: str, request_body: dict) -> None:
 
             from app.rules.engine import evaluate_rules
             rule_violations = evaluate_rules(destination, rendition, [])
+            t_rules = time.perf_counter()
 
             # Persist rule evaluations
             from app.db.models.rule import RuleEvaluation
@@ -128,7 +132,6 @@ async def process_publish_job(job_id: str, request_body: dict) -> None:
             await session.commit()
 
             if rule_violations:
-                from app.core.errors import AppError, ErrorCode
                 first = rule_violations[0]
                 raise AppError(first.code, first.message)
 
@@ -136,14 +139,15 @@ async def process_publish_job(job_id: str, request_body: dict) -> None:
             await repo.update_state(job_id, JobState.RUNNING, progress=20)
             await session.commit()
             validation = await connector.validate(rendition, destination, connection)
+            t_val = time.perf_counter()
             if not validation.get("ok"):
-                from app.core.errors import DestSpecViolationError
                 raise DestSpecViolationError(validation.get("violations", []))
 
             # ── Publish ──────────────────────────────────────────────────────
             await repo.update_state(job_id, JobState.RUNNING, progress=50)
             await session.commit()
             result = await connector.publish(rendition, destination, connection, idempotency_key)
+            t_pub = time.perf_counter()
 
             # ── Persist Publication record ────────────────────────────────────
             from app.db.models.publication import Publication
@@ -158,16 +162,49 @@ async def process_publish_job(job_id: str, request_body: dict) -> None:
             )
             session.add(pub)
 
-            # ── Persist OutputManifest ────────────────────────────────────────
+            # ── Persist OutputManifest (IS-9) ─────────────────────────────────
             from app.db.models.manifest import OutputManifest
+            connector_manifest = getattr(connector, "manifest", None)
+            connector_ver = connector_manifest.version if connector_manifest else "1.0.0"
+            result_url = f"/api/v1/jobs/{job_id}/manifest"
+
             manifest_data = {
+                "manifest_version": "1.0.0",
                 "job_id": job_id,
                 "connector_key": connector_key,
-                "platform_post_id": result.get("platform_post_id"),
-                "live_url": result.get("live_url"),
-                "status": result.get("status"),
-                "simulated": result.get("_simulated", False),
+                "connector_version": connector_ver,
+                "models_providers": [
+                    {
+                        "role": "connector",
+                        "provider": connector_key,
+                        "version": connector_ver,
+                    }
+                ],
+                "settings": {
+                    "destination_id": destination_id,
+                    "simulated": result.get("_simulated", False),
+                    "callback_url": callback_url,
+                },
+                "timings_ms": {
+                    "rules_evaluation": round((t_rules - t0) * 1000, 2),
+                    "validation": round((t_val - t_rules) * 1000, 2),
+                    "publish": round((t_pub - t_val) * 1000, 2),
+                    "total": round((t_pub - t0) * 1000, 2),
+                },
+                "cost_estimate_usd": 0.0,
+                "warnings": [rv.message for rv in rule_violations],
+                "artifacts": {
+                    "platform_post_id": result.get("platform_post_id"),
+                    "live_url": result.get("live_url"),
+                    "result_url": result_url,
+                    "assist_pack": result.get("files") or ({"deep_link": result.get("deep_link")} if result.get("deep_link") else None),
+                },
+                "license": {
+                    "rights": "All rights reserved by author/publisher",
+                    "license_type": "Author Owned",
+                },
                 "rendition_title": rendition.get("title"),
+                "status": result.get("status", "published"),
             }
             manifest = OutputManifest(
                 id=new_uuid(),
@@ -183,6 +220,7 @@ async def process_publish_job(job_id: str, request_body: dict) -> None:
                 progress=100,
                 platform_post_id=result.get("platform_post_id"),
                 live_url=result.get("live_url"),
+                result_url=result_url,
             )
             await session.commit()
             logger.info("job_succeeded", job_id=job_id, live_url=result.get("live_url"))

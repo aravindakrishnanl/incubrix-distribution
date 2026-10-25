@@ -31,12 +31,28 @@ class S3Storage(BaseStorage):
 
     async def put(self, key: str, data: bytes, content_type: str = "application/octet-stream") -> str:
         async with self._client() as s3:
-            await s3.put_object(
-                Bucket=self._bucket,
-                Key=key,
-                Body=data,
-                ContentType=content_type,
-            )
+            try:
+                await s3.put_object(
+                    Bucket=self._bucket,
+                    Key=key,
+                    Body=data,
+                    ContentType=content_type,
+                )
+            except Exception as exc:
+                # Automatically initialize bucket if not created yet
+                if "NoSuchBucket" in str(type(exc).__name__) or "NoSuchBucket" in str(exc) or "404" in str(exc):
+                    try:
+                        await s3.create_bucket(Bucket=self._bucket)
+                    except Exception:
+                        pass
+                    await s3.put_object(
+                        Bucket=self._bucket,
+                        Key=key,
+                        Body=data,
+                        ContentType=content_type,
+                    )
+                else:
+                    raise
         logger.info("s3_put", key=key, size=len(data))
         return key
 
@@ -62,4 +78,10 @@ class S3Storage(BaseStorage):
 
     async def health_check(self) -> None:
         async with self._client() as s3:
-            await s3.head_bucket(Bucket=self._bucket)
+            try:
+                await s3.head_bucket(Bucket=self._bucket)
+            except Exception:
+                try:
+                    await s3.create_bucket(Bucket=self._bucket)
+                except Exception:
+                    pass

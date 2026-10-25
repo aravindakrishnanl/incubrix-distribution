@@ -18,7 +18,6 @@ data/ghost/
 htmlcov/
 .coverage
 coverage.xml
-openapi.yaml
 write_project.py
 pdf_content.txt
 

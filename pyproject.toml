@@ -44,6 +44,7 @@ filterwarnings = [
     "error",
     "ignore::DeprecationWarning",
     "ignore::PendingDeprecationWarning",
+    "ignore::starlette.exceptions.StarletteDeprecationWarning",
 ]
 markers = [
     "integration: marks tests requiring live services (deselect with -m 'not integration')",
