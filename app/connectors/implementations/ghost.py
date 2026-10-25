@@ -172,3 +172,115 @@ class GhostConnector(BaseConnector):
             "message": f"Successfully authenticated with Ghost site '{site.get('title')}'",
             "details": {"base_url": base_url, "title": site.get("title"), "version": site.get("version")},
         }
+
+    async def publish_draft(
+        self,
+        platform_post_id: str,
+        connection: dict[str, Any] | None = None,
+        destination: dict[str, Any] | None = None,
+        expected_title: str = "[TEST DRAFT] IncuBrix Ghost Integration Verification",
+        force_live: bool = False,
+    ) -> dict[str, Any]:
+        """Safely publish an existing Ghost draft by its platform_post_id.
+
+        Enforces:
+        1. Reuses Ghost authentication/JWT signing logic. Never leaks API keys.
+        2. Fetches existing post first and retrieves current 'updated_at' to prevent collision.
+        3. Confirms post title matches expected_title before modifying.
+        4. Updates the exact post via PUT /ghost/api/admin/posts/{id}/ with status='published'.
+        5. Returns status and public URL. Never calls POST (never creates new posts).
+        """
+        if not platform_post_id:
+            from app.core.errors import AppError, ErrorCode
+            raise AppError(ErrorCode.VALIDATION_ERROR, "platform_post_id is required to publish draft")
+
+        if self._is_simulation() and not force_live:
+            logger.info("ghost_publish_draft_simulated", post_id=platform_post_id)
+            return {
+                "platform_post_id": platform_post_id,
+                "title": expected_title,
+                "status": "published",
+                "live_url": f"https://sim.example.com/ghost/{platform_post_id}",
+                "_simulated": True,
+            }
+
+        conn = connection or {}
+        dest = destination or {}
+        base_url = self._base_url(conn, dest)
+        headers = self._headers(conn)
+
+        async with httpx.AsyncClient(timeout=get_settings().http_timeout_seconds) as client:
+            # 1. Fetch the existing post first
+            resp = await client.get(
+                f"{base_url}/ghost/api/admin/posts/{platform_post_id}/",
+                headers=headers,
+            )
+            if not resp.is_success:
+                self._map_error(resp.status_code)
+                from app.core.errors import AppError, ErrorCode
+                raise AppError(
+                    ErrorCode.PLATFORM_CONTENT_REJECTED,
+                    f"Failed to fetch Ghost post '{platform_post_id}': HTTP {resp.status_code} {resp.text[:200]}",
+                )
+
+            data = resp.json()
+            posts = data.get("posts", [])
+            if not posts:
+                from app.core.errors import AppError, ErrorCode
+                raise AppError(
+                    ErrorCode.NOT_FOUND,
+                    f"Ghost post '{platform_post_id}' not found in API response",
+                )
+
+            post = posts[0]
+            current_title = post.get("title", "")
+            updated_at = post.get("updated_at")
+
+            # 2. Confirm target post title matches expected_title
+            if expected_title and current_title != expected_title:
+                from app.core.errors import AppError, ErrorCode
+                raise AppError(
+                    ErrorCode.VALIDATION_ERROR,
+                    f"Safety check failed: post '{platform_post_id}' title is {current_title!r}, "
+                    f"which does not match expected title {expected_title!r}. Refusing to publish.",
+                )
+
+            if not updated_at:
+                from app.core.errors import AppError, ErrorCode
+                raise AppError(
+                    ErrorCode.VALIDATION_ERROR,
+                    f"Ghost post '{platform_post_id}' has no 'updated_at' timestamp; cannot safely update.",
+                )
+
+            # 3. Update that same post using Ghost Admin API PUT /ghost/api/admin/posts/{id}/
+            update_payload = {
+                "posts": [{
+                    "status": "published",
+                    "updated_at": updated_at,
+                }]
+            }
+            put_resp = await client.put(
+                f"{base_url}/ghost/api/admin/posts/{platform_post_id}/",
+                json=update_payload,
+                headers=headers,
+            )
+            if not put_resp.is_success:
+                self._map_error(put_resp.status_code)
+                from app.core.errors import AppError, ErrorCode
+                raise AppError(
+                    ErrorCode.PLATFORM_CONTENT_REJECTED,
+                    f"Failed to publish Ghost post '{platform_post_id}': HTTP {put_resp.status_code} {put_resp.text[:200]}",
+                )
+
+            put_data = put_resp.json()
+            updated_posts = put_data.get("posts", [])
+            updated_post = updated_posts[0] if updated_posts else post
+            new_status = updated_post.get("status", "published")
+            live_url = updated_post.get("url", "")
+
+            return {
+                "platform_post_id": platform_post_id,
+                "title": current_title,
+                "status": new_status,
+                "live_url": live_url,
+            }

@@ -1,17 +1,23 @@
+
 """Assisted Publishing connector.
 
-Builds a ready-to-post pack for human posting where automation is not allowed.
-Returns: {files[], caption, deep_link, checklist[]}
+Builds a ready-to-post pack for human posting.
+Packs are stored locally and can be retrieved through the returned pack path.
 """
 
 from __future__ import annotations
 
+import json
+import re
+from pathlib import Path
 from typing import Any
 
 from app.connectors.base import BaseConnector
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
+
+PACKS_DIR = Path("artifacts") / "assisted"
 
 
 class AssistedConnector(BaseConnector):
@@ -23,16 +29,47 @@ class AssistedConnector(BaseConnector):
     async def validate(self, rendition, destination, connection) -> dict[str, Any]:
         violations = []
         if not rendition.get("title"):
-            violations.append({"field": "title", "message": "title is required for assisted pack"})
+            violations.append({
+                "field": "title",
+                "message": "title is required for assisted pack",
+            })
         return {"ok": not violations, "violations": violations}
 
-    async def publish(self, rendition, destination, connection, idempotency_key) -> dict[str, Any]:
-        # Assisted publishing does not automate posting; publish returns a pack reference
+    async def publish(
+        self, rendition, destination, connection, idempotency_key
+    ) -> dict[str, Any]:
         pack = await self.build_assist_pack(rendition, destination)
+
+        PACKS_DIR.mkdir(parents=True, exist_ok=True)
+        safe_id = re.sub(r"[^a-zA-Z0-9_-]", "_", str(idempotency_key))
+        pack_path = PACKS_DIR / f"{safe_id}.json"
+        pack_path.write_text(
+            json.dumps(pack, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        markdown = next(
+            (item["content"] for item in pack["files"]
+             if item["name"] == "post.md"),
+            "",
+        )
+        markdown_path = PACKS_DIR / f"{safe_id}.md"
+        markdown_path.write_text(markdown, encoding="utf-8")
+
+        logger.info(
+            "assisted_pack_saved",
+            pack_id=safe_id,
+            file_count=len(pack["files"]),
+        )
+
         return {
-            "platform_post_id": f"assisted:{idempotency_key}",
-            "live_url": pack.get("deep_link", ""),
+            "platform_post_id": f"assisted:{safe_id}",
+            "live_url": None,
             "status": "assist_ready",
+            "pack_path": str(pack_path.resolve()),
+            "markdown_path": str(markdown_path.resolve()),
+            "destination_url": pack["destination_url"],
+            "checklist": pack["checklist"],
         }
 
     async def get_status(self, platform_post_id, connection) -> dict[str, Any]:
@@ -42,51 +79,63 @@ class AssistedConnector(BaseConnector):
         return {"deleted": True}
 
     async def build_assist_pack(self, rendition, destination) -> dict[str, Any]:
-        """Build the assisted publishing pack.
-
-        Returns:
-          files: list of file dicts {name, content_type, url_or_content}
-          caption: suggested caption/body text
-          deep_link: direct link to post in the destination (if available)
-          checklist: list of rule/policy checks for the human poster
-        """
         title = rendition.get("title", "")
         body = rendition.get("body", "")
-        rules_url = destination.get("rules_url", "")
+        rules_url = destination.get("rules_url") or destination.get("url", "")
         dest_url = destination.get("url", "")
-        platform = destination.get("platform_key", "unknown")
 
-        # Build checklist from destination rules
         checklist = [
-            {"check": "Read community rules before posting", "url": rules_url or dest_url, "required": True},
-            {"check": "Ensure title follows platform guidelines", "required": True},
-            {"check": "Remove or disclose AI-generated content if required", "required": destination.get("disclosure_required", False)},
-            {"check": "Confirm self-promotion is allowed", "required": not destination.get("self_promo_allowed", True)},
-            {"check": "Confirm frequency cap has not been exceeded", "required": bool(destination.get("frequency_cap"))},
-            {"check": "Delete post within 10 minutes if it is a test", "required": True},
-        ]
-
-        # Build file list (text file with ready-to-paste content)
-        post_text = f"# {title}\n\n{body}"
-        files = [
             {
-                "name": "post.md",
-                "content_type": "text/markdown",
-                "content": post_text,
-            }
+                "check": "Read destination rules before posting",
+                "url": rules_url,
+                "required": True,
+            },
+            {
+                "check": "Verify the title and content",
+                "required": True,
+            },
+            {
+                "check": "Disclose AI-generated content if required",
+                "required": bool(destination.get("disclosure_required", False)),
+            },
+            {
+                "check": "Verify self-promotion is allowed",
+                "required": not destination.get("self_promo_allowed", True),
+            },
+            {
+                "check": "Check the destination's posting frequency cap",
+                "required": bool(destination.get("frequency_cap")),
+            },
         ]
-        if images := rendition.get("images", []):
-            for i, img in enumerate(images):
-                files.append({"name": f"image_{i+1}", "content_type": "image/*", "url": img})
 
-        deep_link = dest_url  # direct link to the destination; human pastes and posts
+        files = [{
+            "name": "post.md",
+            "content_type": "text/markdown",
+            "content": f"# {title}\n\n{body}",
+        }]
 
-        logger.info("assisted_pack_built", platform=platform, file_count=len(files))
+        for i, img in enumerate(rendition.get("images", []), start=1):
+            files.append({
+                "name": f"image_{i}",
+                "content_type": "image/*",
+                "url": img,
+            })
+
         return {
-            "files": files,
+            "title": title,
+            "destination_name": destination.get("name", "Unknown destination"),
+            "destination_url": dest_url,
+            "deep_link": dest_url,
+            "rules_url": rules_url,
             "caption": body[:300] + ("..." if len(body) > 300 else ""),
-            "deep_link": deep_link,
-            "checklist": [c for c in checklist if c.get("required") or True],
+            "files": files,
+            "checklist": checklist,
+            "instructions": [
+                "Open the destination URL.",
+                "Review the destination rules and checklist.",
+                "Copy the content from the Markdown file.",
+                "Publish manually and verify the resulting post.",
+            ],
         }
 
     async def check_connectivity(
@@ -96,6 +145,6 @@ class AssistedConnector(BaseConnector):
     ) -> dict[str, Any]:
         return {
             "ok": True,
-            "message": "Assisted publishing ready (human-in-the-loop, no external API credentials required)",
+            "message": "Assisted publishing is ready; posting requires a human.",
             "details": {"tier": "assisted", "requires_auth": False},
         }

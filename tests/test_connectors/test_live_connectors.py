@@ -16,7 +16,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.connectors.registry import get_connector, init_registry
 from app.core.errors import (
+    AppError,
     AuthExpiredError,
+    ErrorCode,
     PlatformRateLimitError,
     PlatformUnavailableError,
 )
@@ -336,6 +338,150 @@ async def test_ghost_live_payload_default_published_status(disable_simulation):
 
 
 @pytest.mark.asyncio
+async def test_devto_live_get_status_reports_draft(disable_simulation):
+    connector = get_connector("devto")
+    response = MagicMock(
+        status_code=200,
+        is_success=True,
+    )
+    response.json.return_value = {
+        "id": 123,
+        "published": False,
+        "url": "https://dev.to/test/draft",
+    }
+
+    with patch("httpx.AsyncClient") as client_cls:
+        client = AsyncMock()
+        client_cls.return_value.__aenter__ = AsyncMock(
+            return_value=client
+        )
+        client_cls.return_value.__aexit__ = AsyncMock(
+            return_value=None
+        )
+        client.get = AsyncMock(return_value=response)
+
+        result = await connector.get_status(
+            "123",
+            {"base_url": "https://dev.to/api", "api_key": "test"},
+        )
+
+    assert result["status"] == "draft"
+    assert result["live_url"] == "https://dev.to/test/draft"
+
+
+@pytest.mark.asyncio
+async def test_devto_live_delete_unpublishes_article(disable_simulation):
+    connector = get_connector("devto")
+    response = MagicMock(status_code=200, is_success=True)
+
+    with patch("httpx.AsyncClient") as client_cls:
+        client = AsyncMock()
+        client_cls.return_value.__aenter__ = AsyncMock(
+            return_value=client
+        )
+        client_cls.return_value.__aexit__ = AsyncMock(
+            return_value=None
+        )
+        client.put = AsyncMock(return_value=response)
+
+        result = await connector.delete(
+            "123",
+            {"base_url": "https://dev.to/api", "api_key": "test"},
+        )
+
+    assert result["deleted"] is True
+    sent = client.put.call_args.kwargs["json"]
+    assert sent == {"article": {"published": False}}
+
+
+@pytest.mark.asyncio
+async def test_ghost_live_get_status_reports_draft(disable_simulation):
+    connector = get_connector("ghost")
+    response = MagicMock(status_code=200, is_success=True)
+    response.json.return_value = {
+        "posts": [{
+            "id": "ghost-draft-123",
+            "status": "draft",
+            "url": "https://ghost.example.com/draft/",
+        }]
+    }
+
+    with patch("httpx.AsyncClient") as client_cls:
+        client = AsyncMock()
+        client_cls.return_value.__aenter__ = AsyncMock(
+            return_value=client
+        )
+        client_cls.return_value.__aexit__ = AsyncMock(
+            return_value=None
+        )
+        client.get = AsyncMock(return_value=response)
+
+        result = await connector.get_status(
+            "ghost-draft-123",
+            {
+                "base_url": "https://ghost.example.com",
+                "admin_api_key": "kid:0123456789abcdef",
+            },
+        )
+
+    assert result["status"] == "draft"
+    assert result["live_url"] == "https://ghost.example.com/draft/"
+
+
+@pytest.mark.asyncio
+async def test_ghost_live_delete_success(disable_simulation):
+    connector = get_connector("ghost")
+    response = MagicMock(status_code=204, is_success=True)
+
+    with patch("httpx.AsyncClient") as client_cls:
+        client = AsyncMock()
+        client_cls.return_value.__aenter__ = AsyncMock(
+            return_value=client
+        )
+        client_cls.return_value.__aexit__ = AsyncMock(
+            return_value=None
+        )
+        client.delete = AsyncMock(return_value=response)
+
+        result = await connector.delete(
+            "ghost-post-123",
+            {
+                "base_url": "https://ghost.example.com",
+                "admin_api_key": "kid:0123456789abcdef",
+            },
+        )
+
+    assert result["deleted"] is True
+    client.delete.assert_called_once()
+    assert "ghost-post-123" in client.delete.call_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_ghost_live_delete_already_missing(disable_simulation):
+    connector = get_connector("ghost")
+    response = MagicMock(status_code=404, is_success=False)
+
+    with patch("httpx.AsyncClient") as client_cls:
+        client = AsyncMock()
+        client_cls.return_value.__aenter__ = AsyncMock(
+            return_value=client
+        )
+        client_cls.return_value.__aexit__ = AsyncMock(
+            return_value=None
+        )
+        client.delete = AsyncMock(return_value=response)
+
+        result = await connector.delete(
+            "missing-post",
+            {
+                "base_url": "https://ghost.example.com",
+                "admin_api_key": "kid:0123456789abcdef",
+            },
+        )
+
+    assert result["deleted"] is True
+
+@pytest.mark.asyncio
 async def test_ghost_live_payload_rendition_precedence(disable_simulation):
     connector = get_connector("ghost")
     mock_resp = MagicMock(status_code=201, is_success=True)
@@ -360,3 +506,186 @@ async def test_ghost_live_payload_rendition_precedence(disable_simulation):
 
         sent_payload = mock_client.post.call_args[1]["json"]
         assert sent_payload["posts"][0]["status"] == "draft"
+
+
+# ── Ghost publish_draft verification tests ───────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_ghost_publish_draft_success(disable_simulation):
+    connector = get_connector("ghost")
+    post_id = "draft_post_123"
+    expected_title = "[TEST DRAFT] IncuBrix Ghost Integration Verification"
+    updated_at = "2026-10-25T08:00:00.000Z"
+
+    mock_get_resp = MagicMock(status_code=200, is_success=True)
+    mock_get_resp.json.return_value = {
+        "posts": [{
+            "id": post_id,
+            "title": expected_title,
+            "status": "draft",
+            "updated_at": updated_at,
+            "url": "https://ghost.example.com/p/draft_post_123/",
+        }]
+    }
+
+    mock_put_resp = MagicMock(status_code=200, is_success=True)
+    mock_put_resp.json.return_value = {
+        "posts": [{
+            "id": post_id,
+            "title": expected_title,
+            "status": "published",
+            "updated_at": "2026-10-25T08:05:00.000Z",
+            "url": "https://ghost.example.com/incubrix-verification/",
+        }]
+    }
+
+    with patch("httpx.AsyncClient") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=None)
+        mock_client.get = AsyncMock(return_value=mock_get_resp)
+        mock_client.put = AsyncMock(return_value=mock_put_resp)
+        mock_client.post = AsyncMock()
+
+        result = await connector.publish_draft(
+            platform_post_id=post_id,
+            connection={"base_url": "https://ghost.example.com", "admin_api_key": "kid:0123456789abcdef"},
+        )
+
+        # 1. Assert GET was called with the post ID URL
+        mock_client.get.assert_called_once()
+        assert f"/ghost/api/admin/posts/{post_id}/" in mock_client.get.call_args[0][0]
+
+        # 2. Assert PUT was called with status="published" and the retrieved updated_at
+        mock_client.put.assert_called_once()
+        put_url = mock_client.put.call_args[0][0]
+        assert f"/ghost/api/admin/posts/{post_id}/" in put_url
+        put_body = mock_client.put.call_args[1]["json"]
+        assert put_body == {
+            "posts": [{
+                "status": "published",
+                "updated_at": updated_at,
+            }]
+        }
+
+        # 3. Assert POST was NEVER called (never creates new post)
+        mock_client.post.assert_not_called()
+
+        # 4. Assert returned result contains status and public URL
+        assert result["platform_post_id"] == post_id
+        assert result["status"] == "published"
+        assert result["live_url"] == "https://ghost.example.com/incubrix-verification/"
+        assert result["title"] == expected_title
+
+
+@pytest.mark.asyncio
+async def test_ghost_publish_draft_wrong_title_rejected(disable_simulation):
+    connector = get_connector("ghost")
+    post_id = "prod_post_999"
+
+    mock_get_resp = MagicMock(status_code=200, is_success=True)
+    mock_get_resp.json.return_value = {
+        "posts": [{
+            "id": post_id,
+            "title": "Important Live Production Article",
+            "status": "draft",
+            "updated_at": "2026-10-25T08:00:00.000Z",
+        }]
+    }
+
+    with patch("httpx.AsyncClient") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=None)
+        mock_client.get = AsyncMock(return_value=mock_get_resp)
+        mock_client.put = AsyncMock()
+        mock_client.post = AsyncMock()
+
+        with pytest.raises(AppError) as exc_info:
+            await connector.publish_draft(
+                platform_post_id=post_id,
+                connection={"base_url": "https://ghost.example.com", "admin_api_key": "kid:0123456789abcdef"},
+            )
+
+        assert exc_info.value.code == ErrorCode.VALIDATION_ERROR
+        assert "Refusing to publish" in exc_info.value.message
+
+        # Assert no modification took place
+        mock_client.put.assert_not_called()
+        mock_client.post.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_ghost_publish_draft_get_failure(disable_simulation):
+    connector = get_connector("ghost")
+    post_id = "missing_post"
+
+    mock_get_resp = MagicMock(status_code=404, is_success=False, text="Post not found")
+
+    with patch("httpx.AsyncClient") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=None)
+        mock_client.get = AsyncMock(return_value=mock_get_resp)
+        mock_client.put = AsyncMock()
+
+        with pytest.raises(AppError) as exc_info:
+            await connector.publish_draft(
+                platform_post_id=post_id,
+                connection={"base_url": "https://ghost.example.com", "admin_api_key": "kid:0123456789abcdef"},
+            )
+
+        assert exc_info.value.code == ErrorCode.PLATFORM_CONTENT_REJECTED
+        assert "HTTP 404" in exc_info.value.message
+        mock_client.put.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_ghost_publish_draft_put_failure(disable_simulation):
+    connector = get_connector("ghost")
+    post_id = "draft_post_123"
+
+    mock_get_resp = MagicMock(status_code=200, is_success=True)
+    mock_get_resp.json.return_value = {
+        "posts": [{
+            "id": post_id,
+            "title": "[TEST DRAFT] IncuBrix Ghost Integration Verification",
+            "status": "draft",
+            "updated_at": "2026-10-25T08:00:00.000Z",
+        }]
+    }
+
+    mock_put_resp = MagicMock(
+        status_code=422,
+        is_success=False,
+        text="Validation error: Collision detected (stale updated_at)",
+    )
+
+    with patch("httpx.AsyncClient") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=None)
+        mock_client.get = AsyncMock(return_value=mock_get_resp)
+        mock_client.put = AsyncMock(return_value=mock_put_resp)
+
+        with pytest.raises(AppError) as exc_info:
+            await connector.publish_draft(
+                platform_post_id=post_id,
+                connection={"base_url": "https://ghost.example.com", "admin_api_key": "kid:0123456789abcdef"},
+            )
+
+        assert exc_info.value.code == ErrorCode.PLATFORM_CONTENT_REJECTED
+        assert "HTTP 422" in exc_info.value.message
+
+
+@pytest.mark.asyncio
+async def test_ghost_publish_draft_simulation_mode():
+    connector = get_connector("ghost")
+    post_id = "draft_sim_456"
+
+    # Default simulation mode (not forced live)
+    result = await connector.publish_draft(platform_post_id=post_id)
+    assert result["_simulated"] is True
+    assert result["platform_post_id"] == post_id
+    assert result["status"] == "published"
+    assert "https://sim.example.com" in result["live_url"]

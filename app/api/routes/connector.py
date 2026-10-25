@@ -26,7 +26,7 @@ _CONNECTIONLESS_METHODS = {"build_assist_pack"}
 _VALID_METHODS = {
     "validate", "publish", "get_status", "delete",
     "fetch_metrics", "refresh_auth", "build_assist_pack",
-    "check_connectivity",
+    "check_connectivity", "publish_draft",
 }
 
 
@@ -107,6 +107,14 @@ async def _invoke(connector: Any, method: str, body: dict[str, Any]) -> Any:
         return await connector.check_connectivity(
             connection=body.get("connection", {}),
             destination=body.get("destination", {}),
+        )
+    elif method == "publish_draft":
+        return await connector.publish_draft(
+            platform_post_id=body.get("platform_post_id", ""),
+            connection=body.get("connection", {}),
+            destination=body.get("destination", {}),
+            expected_title=body.get("expected_title", "[TEST DRAFT] IncuBrix Ghost Integration Verification"),
+            force_live=body.get("force_live", False),
         )
     else:
         raise NotImplementedError(method)

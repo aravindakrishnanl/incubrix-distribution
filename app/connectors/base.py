@@ -145,3 +145,14 @@ class BaseConnector(ABC):
         Returns: {ok: bool, message: str, details: dict}
         """
         raise NotImplementedError(f"Connector {self.key!r} does not support check_connectivity")
+
+    async def publish_draft(
+        self,
+        platform_post_id: str,
+        connection: dict[str, Any] | None = None,
+        destination: dict[str, Any] | None = None,
+        expected_title: str | None = None,
+        force_live: bool = False,
+    ) -> dict[str, Any]:
+        """Publish an existing draft post by its platform ID without creating a new post."""
+        raise NotImplementedError(f"Connector {self.key!r} does not support publish_draft")

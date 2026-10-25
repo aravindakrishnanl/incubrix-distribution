@@ -229,6 +229,99 @@ $jobStatus
 
 ---
 
+## Unified Publishing CLI (`app.cli`)
+
+IncuBrix provides a command-line interface for multi-destination publishing (`python -m app.cli publish`). The CLI discovers active destinations from the catalogue, validates content against community posting rules, generates deterministic idempotency keys per destination, and monitors jobs to completion.
+
+### 1. Command Syntax
+
+```powershell
+# Initialize or update destination catalogue and encrypted connection records
+python -m app.cli seed
+# (or directly via standalone script: python scripts/seed_catalogue.py)
+
+# List active destinations currently registered in the catalogue
+python -m app.cli destinations
+
+# Inspect planned publication without submitting jobs (Safe default)
+python -m app.cli publish --input content.json --destinations all --dry-run
+
+# Execute real publication across all active destinations
+python -m app.cli publish --input content.json --destinations all --live
+
+# Publish to specific destination IDs
+python -m app.cli publish --input content.json --destinations dest-id-1,dest-id-2 --live
+```
+
+### 2. Content JSON Format (`content.json`)
+
+```json
+{
+  "title": "Scaling Distributed Content Pipelines",
+  "body": "Detailed technical article content written in Markdown format.\n\nKey takeaways and implementation details.",
+  "tags": ["python", "fastapi", "architecture"],
+  "canonical_url": "https://example.com/original-post",
+  "ai_disclosed": true,
+  "is_promotional": false
+}
+```
+*(Nested format `{"rendition": { ... }}` is also supported).*
+
+### 3. Authentication Setup
+
+The CLI automatically reads the configured `API_BEARER_TOKEN` from your local `.env` or system environment. You can also explicitly provide `--token <token>`. API keys for third-party platforms are never passed over the CLI; they remain encrypted in the database or server environment.
+
+### 4. Dry-Run vs. Live Mode
+
+* **Dry-Run Mode (`--dry-run` or default):**
+  - Fetches and filters active destinations from `GET /api/v1/destinations`.
+  - Validates title, body, and destination posting rules (e.g. AI disclosure, self-promotion, frequency caps).
+  - Displays planned operations with deterministic idempotency keys.
+  - **Does NOT submit publish jobs or invoke external APIs.**
+* **Live Mode (`--live`):**
+  - Explicit authorization is mandatory.
+  - Generates a unique batch identifier and dispatches jobs concurrently via `POST /api/v1/publish`.
+  - Concurrently polls `GET /api/v1/jobs/{job_id}` until each job reaches a terminal state (`succeeded` or `failed`).
+  - **Warning:** If server `SIMULATION_MODE=false`, connectors will dispatch live network calls to third-party platforms.
+
+### 5. Sample Consolidated Report
+
+```text
+==========================================================================================
+INCUBRIX UNIFIED PUBLISHING BATCH REPORT
+==========================================================================================
+Batch ID     : batch-1729851234-a1b2c3
+Content Title: Scaling Distributed Content Pipelines
+Total Dests  : 3 (Succeeded: 3, Failed: 0)
+------------------------------------------------------------------------------------------
+[1] Destination : DEV.to Publication (devto)
+    ID          : 8a9b1c2d-3e4f-5a6b-7c8d-9e0f1a2b3c4d
+    Job ID      : e1f2a3b4-5c6d-7e8f-9a0b-1c2d3e4f5a6b
+    Status      : PUBLISHED
+    Reference   : [Public URL] https://dev.to/user/scaling-distributed-content-pipelines
+    Duration    : 1.82s
+
+[2] Destination : Partner Webhook (webhook_hmac)
+    ID          : 4e5f6a7b-8c9d-0e1f-2a3b-4c5d6e7f8a9b
+    Job ID      : 9a0b1c2d-3e4f-5a6b-7c8d-9e0f1a2b3c4d
+    Status      : DELIVERED
+    Reference   : [Webhook Delivered] Endpoint: https://webhook.site/test-endpoint
+    Duration    : 0.94s
+
+[3] Destination : Tech Community Review (assisted)
+    ID          : 1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d
+    Job ID      : 3c4d5e6f-7a8b-9c0d-1e2f-3a4b5c6d7e8f
+    Status      : ASSIST_READY
+    Reference   : [Assisted Pack Ready] Submission Link: https://example.com/submit (Human post required - not publicly published)
+    Duration    : 0.45s
+
+==========================================================================================
+ALL PUBLISH JOBS SUCCEEDED (3/3)
+==========================================================================================
+```
+
+---
+
 ## Running the Automated Test Suite
 
 Run the full pytest suite:
@@ -238,10 +331,10 @@ Run the full pytest suite:
 
 ### Verified Test Results
 ```text
-======================= 103 passed, 1 skipped in 6.17s =======================
+======================= 125 passed, 1 skipped in 6.32s =======================
 ```
-* **Passed (103):** Covers API contracts, connector implementations, live payload formats, idempotency guarantees, rules engine evaluation, error envelopes, and Phase 2 security hardening.
-* **Skipped (1):** `tests/test_storage.py:80` (`test_s3_storage_roundtrip_integration`), which requires a live MinIO container. Local filesystem storage tests pass completely.
+* **Passed (125):** Covers API contracts, CLI unified publishing, connector implementations, live payload formats, idempotency guarantees, rules engine evaluation, error envelopes, and Phase 2 security hardening.
+* **Skipped (1):** `tests/test_storage.py:80` (`test_s3_put_and_get`), which requires a live MinIO container. Local filesystem storage tests pass completely.
 
 ---
 
@@ -249,4 +342,4 @@ Run the full pytest suite:
 
 1. **In-Memory Background Task Durability:** Publishing jobs are dispatched using in-process `asyncio.create_task`. In the event of an ungraceful process crash or worker reboot, any job in `QUEUED` or `RUNNING` status is not automatically re-queued upon startup. A persistent distributed queue (e.g. Celery / ARQ with Redis) should be introduced for multi-worker production deployments.
 2. **Transient Network Retries:** While `http_max_retries: 3` is configured in application settings, the background processor currently fails jobs immediately upon the first unhandled connector exception. Automatic exponential backoff retries for transient HTTP errors (`PlatformUnavailableError`, `503`) are planned for a subsequent release.
-3. **Mocked Tests vs. Live Outbound Publishing:** Automated tests use mocks and simulation mode to verify request structures and draft flag preservation. Live credentials configured in `.env` are verified via read-only connectivity endpoints (`check_connectivity`) and have not made real public posts to external networks during this evaluation.
+3. **Simulation Mode Toggle Scope:** Client-side dry-run (`--dry-run`) validates plans locally without dispatching jobs. Actual live dispatch (`--live`) submits jobs whose network behavior is determined by the server's `SIMULATION_MODE` setting.

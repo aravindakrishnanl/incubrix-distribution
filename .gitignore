@@ -24,3 +24,9 @@ pdf_content.txt
 
 ANTIGRAVITY_HANDOVER.md
 NEXT_SESSION_PROMPT.md
+
+# Local runtime outputs
+/artifacts/
+/all-platforms-result.json
+/content.json
+/lemmy-job-status.json

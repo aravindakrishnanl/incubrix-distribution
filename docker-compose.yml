@@ -197,7 +197,7 @@ services:
     ports:
       - "8080:8080"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health', timeout=3)"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -212,10 +212,12 @@ services:
     depends_on:
       db:
         condition: service_healthy
-      minio-init:
-        condition: service_completed_successfully
+      # minio-init:
+      #   condition: service_completed_successfully
     environment:
       <<: *app-env
+      STORAGE_BACKEND: local
+      LOCAL_STORAGE_PATH: /app/data/local_storage
     ports:
       - "8000:8000"
     healthcheck:

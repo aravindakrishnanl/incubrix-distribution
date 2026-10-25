@@ -8,7 +8,7 @@ Job state is persisted to PostgreSQL — survives process restarts
 from __future__ import annotations
 
 import json
-
+import asyncio
 from app.core.logging import get_logger
 from app.db.engine import get_session_factory
 from app.db.models.job import JobState
@@ -186,7 +186,29 @@ async def process_publish_job(job_id: str, request_body: dict) -> None:
             )
             await session.commit()
             logger.info("job_succeeded", job_id=job_id, live_url=result.get("live_url"))
-
+        except asyncio.CancelledError:
+            logger.warning(
+                "job_cancelled_during_processing",
+                job_id=job_id,
+            )
+            try:
+                await repo.update_state(
+                    job_id,
+                    JobState.FAILED,
+                    progress=0,
+                    error_message=(
+                        "Job was cancelled during processing. "
+                        "External publishing outcome may be unknown; "
+                        "verify the platform before retrying."
+                    ),
+                )
+                await session.commit()
+            except Exception:
+                logger.exception(
+                    "job_cancellation_state_update_failed",
+                    job_id=job_id,
+                )
+            raise
         except AppError as exc:
             try:
                 await repo.update_state(
